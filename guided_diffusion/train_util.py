@@ -12,10 +12,17 @@ from .fp16_util import MixedPrecisionTrainer
 from .nn import update_ema
 from .resample import LossAwareSampler, UniformSampler
 from visdom import Visdom
-viz = Visdom(port=8097)
-loss_window = viz.line( Y=th.zeros((1)).cpu(), X=th.zeros((1)).cpu(), opts=dict(xlabel='epoch', ylabel='Loss', title='loss'))
-grad_window = viz.line(Y=th.zeros((1)).cpu(), X=th.zeros((1)).cpu(),
-                           opts=dict(xlabel='step', ylabel='amplitude', title='gradient'))
+
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["WORLD_SIZE"] = "1"
+os.environ["RANK"] = "0"
+os.environ["LOCAL_RANK"] = "0"
+
+# viz = Visdom(port=8097)
+# loss_window = viz.line( Y=th.zeros((1)).cpu(), X=th.zeros((1)).cpu(), opts=dict(xlabel='epoch', ylabel='Loss', title='loss'))
+# grad_window = viz.line(Y=th.zeros((1)).cpu(), X=th.zeros((1)).cpu(),
+#                            opts=dict(xlabel='step', ylabel='amplitude', title='gradient'))
 
 
 # For ImageNet experiments, this was a good default value.
@@ -80,7 +87,10 @@ class TrainLoop:
 
         self.step = 0
         self.resume_step = 0
-        self.global_batch = self.batch_size * dist.get_world_size()
+        if dist.is_initialized():
+            self.global_batch = self.batch_size * dist.get_world_size()
+        else:
+            self.global_batch = self.batch_size
 
         self.sync_cuda = th.cuda.is_available()
 
@@ -108,31 +118,32 @@ class TrainLoop:
             ]
 
         if th.cuda.is_available():
-            self.use_ddp = True
-            self.ddp_model = DDP(
-                self.model,
-                device_ids=[dist_util.dev()],
-                output_device=dist_util.dev(),
-                broadcast_buffers=False,
-                bucket_cap_mb=128,
-                find_unused_parameters=False,
-            )
-        else:
-            if dist.get_world_size() > 1:
-                logger.warn(
-                    "Distributed training requires CUDA. "
-                    "Gradients will not be synchronized properly!"
-                )
             self.use_ddp = False
-            self.ddp_model = self.model
+            # self.ddp_model = DDP(
+            #     self.model,
+            #     device_ids=[dist_util.dev()],
+            #     output_device=dist_util.dev(),
+            #     broadcast_buffers=False,
+            #     bucket_cap_mb=128,
+            #     find_unused_parameters=False,
+            # )
+            self.ddp_model = self.model.to(th.device("cuda"))
+        # else:
+        #     if dist.get_world_size() > 1:
+        #         logger.warn(
+        #             "Distributed training requires CUDA. "
+        #             "Gradients will not be synchronized properly!"
+        #         )
+        #     self.use_ddp = False
+        #     self.ddp_model = self.model
 
     def _load_and_sync_parameters(self):
         resume_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
 
         if resume_checkpoint:
-            print('resume model')
+            print('Resume model')
             self.resume_step = parse_resume_step_from_filename(resume_checkpoint)
-            if dist.get_rank() == 0:
+            if dist.is_initialized() and dist.get_rank() == 0:
                 logger.log(f"loading model from checkpoint: {resume_checkpoint}...")
                 self.model.load_state_dict(
                     dist_util.load_state_dict(
@@ -148,7 +159,7 @@ class TrainLoop:
         main_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
         ema_checkpoint = find_ema_checkpoint(main_checkpoint, self.resume_step, rate)
         if ema_checkpoint:
-            if dist.get_rank() == 0:
+            if dist.is_initialized() and dist.get_rank() == 0:
                 logger.log(f"loading EMA from checkpoint: {ema_checkpoint}...")
                 state_dict = dist_util.load_state_dict(
                     ema_checkpoint, map_location=dist_util.dev()
@@ -164,7 +175,7 @@ class TrainLoop:
             bf.dirname(main_checkpoint), f"opt{self.resume_step:06}.pt"
         )
         if bf.exists(opt_checkpoint):
-            logger.log(f"loading optimizer state from checkpoint: {opt_checkpoint}")
+            logger.log(f"Loading optimizer state from checkpoint: {opt_checkpoint}")
             state_dict = dist_util.load_state_dict(
                 opt_checkpoint, map_location=dist_util.dev()
             )
@@ -292,7 +303,7 @@ class TrainLoop:
     def save(self):
         def save_checkpoint(rate, params):
             state_dict = self.mp_trainer.master_params_to_state_dict(params)
-            if dist.get_rank() == 0:
+            if dist.is_initialized() and dist.get_rank() == 0:
                 logger.log(f"saving model {rate}...")
                 if not rate:
                     filename = f"savedmodel{(self.step+self.resume_step):06d}.pt"
@@ -305,14 +316,14 @@ class TrainLoop:
         for rate, params in zip(self.ema_rate, self.ema_params):
             save_checkpoint(rate, params)
 
-        if dist.get_rank() == 0:
+        if dist.is_initialized() and dist.get_rank() == 0:
             with bf.BlobFile(
                 bf.join(get_blob_logdir(), f"optsavedmodel{(self.step+self.resume_step):06d}.pt"),
                 "wb",
             ) as f:
                 th.save(self.opt.state_dict(), f)
 
-        dist.barrier()
+        # dist.barrier()
 
 
 def parse_resume_step_from_filename(filename):

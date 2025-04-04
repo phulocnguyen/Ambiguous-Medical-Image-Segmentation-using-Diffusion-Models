@@ -7,8 +7,6 @@ import argparse
 import os
 import torch
 import nibabel as nib
-from visdom import Visdom
-viz = Visdom(port=8097)
 import sys
 import random
 sys.path.append(".")
@@ -17,7 +15,7 @@ import time
 import torch as th
 import torch.distributed as dist
 from guided_diffusion import dist_util, logger
-from guided_diffusion.bratsloader import BRATSDataset
+# from guided_diffusion.bratsloader import BRATSDataset
 from guided_diffusion.lidcloader import LIDCDataset
 from guided_diffusion.script_util import (
     NUM_CLASSES,
